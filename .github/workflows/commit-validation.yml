@@ -24,7 +24,7 @@ jobs:
           
       - name: Install PR Guard
         run: |
-          go install github.com/yourusername/pr-guard/cmd/pr-guard@latest
+          go build -o pr-guard ./cmd/pr-guard/main.go
           
       - name: Get commit range
         id: range

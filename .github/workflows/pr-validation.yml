@@ -29,7 +29,7 @@ jobs:
           
       - name: Install PR Guard
         run: |
-          go install github.com/yourusername/pr-guard/cmd/pr-guard@latest
+          go install github.com/anket-cd/pr-guard/cmd/pr-guard@latest
           
       - name: Validate PR
         id: validate
