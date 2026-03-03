@@ -2,9 +2,9 @@ name: Commit Validation
 
 on:
   push:
-    branches: [main, develop, 'release/*']
+    branches: [master, develop, 'release/*']
   pull_request:
-    branches: [main, develop, 'release/*']
+    branches: [master, develop, 'release/*']
 
 jobs:
   validate-commits:
@@ -24,7 +24,7 @@ jobs:
           
       - name: Install PR Guard
         run: |
-          go install github.com/yourusername/pr-guard/cmd/pr-guard@latest
+          go build -o pr-guard ./cmd/pr-guard/main.go
           
       - name: Get commit range
         id: range

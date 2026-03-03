@@ -8,6 +8,7 @@ import (
 )
 
 // Client wraps the GitHub client to provide access to all methods
+// no used
 type Client struct {
 	*github.Client
 }
