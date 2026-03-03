@@ -1,0 +1,44 @@
+name: Commit Validation
+
+on:
+  push:
+    branches: [main, develop, 'release/*']
+  pull_request:
+    branches: [main, develop, 'release/*']
+
+jobs:
+  validate-commits:
+    name: Validate Commits
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          
+      - name: Install PR Guard
+        run: |
+          go install github.com/yourusername/pr-guard/cmd/pr-guard@latest
+          
+      - name: Get commit range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "range=${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+          else
+            if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+              echo "range=HEAD~${{ github.event.commits.length }}" >> $GITHUB_OUTPUT
+            else
+              echo "range=${{ github.event.before }}..${{ github.event.after }}" >> $GITHUB_OUTPUT
+            fi
+          fi
+          
+      - name: Validate commits
+        run: |
+          pr-guard validate-commits "${{ steps.range.outputs.range }}" --config .pr-guard.yaml
