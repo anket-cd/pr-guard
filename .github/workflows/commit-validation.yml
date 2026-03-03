@@ -1,14 +1,19 @@
 name: Commit Validation
 
 on:
-  push:
-    branches: [main, develop, 'release/*']
   pull_request:
-    branches: [main, develop, 'release/*']
+    branches: [main, master, develop, 'release/*']
+  push:
+    branches: [main, master, develop, 'release/*']
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
 
 jobs:
   validate-commits:
-    name: Validate Commits
+    name: Validate Commit Messages
     runs-on: ubuntu-latest
     
     steps:
@@ -16,21 +21,31 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
+          cache: true
           
-      - name: Install PR Guard
+      - name: Install dependencies
+        run: go mod download
+        
+      - name: Build PR Guard
         run: |
-          go install github.com/yourusername/pr-guard/cmd/pr-guard@latest
+          go build -o pr-guard ./cmd/pr-guard
+          chmod +x pr-guard
           
       - name: Get commit range
         id: range
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "range=${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            echo "range=${BASE_SHA}..${HEAD_SHA}" >> $GITHUB_OUTPUT
+            echo "base=${BASE_SHA}" >> $GITHUB_OUTPUT
+            echo "head=${HEAD_SHA}" >> $GITHUB_OUTPUT
           else
             if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
               echo "range=HEAD~${{ github.event.commits.length }}" >> $GITHUB_OUTPUT
@@ -39,6 +54,161 @@ jobs:
             fi
           fi
           
-      - name: Validate commits
+      - name: Get commit details
+        id: commits
         run: |
-          pr-guard validate-commits "${{ steps.range.outputs.range }}" --config .pr-guard.yaml
+          # Create a table of commits with hash, message, author
+          echo "### 📋 Commit List" > commit-summary.md
+          echo "| Hash | Message | Author |" >> commit-summary.md
+          echo "|------|---------|--------|" >> commit-summary.md
+          
+          git log --format="| \`%h\` | %s | %an |" ${{ steps.range.outputs.range }} >> commit-summary.md
+          
+          # Save commit messages for validation
+          git log --format="%h|%s|%an|%b" ${{ steps.range.outputs.range }} > commit-details.txt
+          
+          echo "count=$(git rev-list --count ${{ steps.range.outputs.range }})" >> $GITHUB_OUTPUT
+          
+      - name: Validate each commit
+        id: validate
+        run: |
+          echo "🔍 Validating ${{ steps.commits.outputs.count }} commits..."
+          echo ""
+          
+          # Create result files
+          echo "✅ **Valid Commits:**" > valid-commits.txt
+          echo "❌ **Invalid Commits:**" > invalid-commits.txt
+          echo "⚠️ **Commits with Warnings:**" > warning-commits.txt
+          
+          valid_count=0
+          invalid_count=0
+          warning_count=0
+          
+          # Read each commit and validate
+          while IFS='|' read -r hash msg author body; do
+            echo "----------------------------------------"
+            echo "Checking commit: ${hash}"
+            
+            # Validate commit
+            if ./pr-guard validate-commit "$msg" --format json > /tmp/validation.json 2>/dev/null; then
+              # Check for warnings
+              if jq -e '.[] | select(.level == "warning")' /tmp/validation.json > /dev/null; then
+                echo "  ⚠️ Commit has warnings"
+                echo "- \`${hash}\`: ${msg} (by ${author})" >> warning-commits.txt
+                ((warning_count++))
+              else
+                echo "  ✅ Valid"
+                echo "- \`${hash}\`: ${msg} (by ${author})" >> valid-commits.txt
+                ((valid_count++))
+              fi
+            else
+              echo "  ❌ Invalid"
+              # Get error details
+              jq -r '.[] | select(.level == "error") | "    - \(.message)\n      💡 \(.suggestion)"' /tmp/validation.json 2>/dev/null || echo "    - Unknown error"
+              echo "- \`${hash}\`: ${msg} (by ${author})" >> invalid-commits.txt
+              ((invalid_count++))
+            fi
+          done < commit-details.txt
+          
+          echo ""
+          echo "📊 Summary:"
+          echo "  ✅ Valid: $valid_count"
+          echo "  ⚠️ Warnings: $warning_count"
+          echo "  ❌ Invalid: $invalid_count"
+          
+          # Set outputs
+          echo "valid_count=$valid_count" >> $GITHUB_OUTPUT
+          echo "invalid_count=$invalid_count" >> $GITHUB_OUTPUT
+          echo "warning_count=$warning_count" >> $GITHUB_OUTPUT
+          
+          # Create final report
+          cat > full-report.md << EOF
+## 📝 Commit Validation Report
+
+### Summary
+- ✅ Valid: $valid_count
+- ⚠️ Warnings: $warning_count
+- ❌ Invalid: $invalid_count
+- Total: $((valid_count + warning_count + invalid_count))
+
+$(cat valid-commits.txt 2>/dev/null || echo "✅ No valid commits")
+
+$(cat warning-commits.txt 2>/dev/null || echo "⚠️ No warnings")
+
+$(cat invalid-commits.txt 2>/dev/null || echo "❌ No invalid commits")
+
+### 📋 Commit List
+$(cat commit-summary.md | tail -n +4)
+EOF
+          
+          # Exit with error if there are invalid commits
+          if [ $invalid_count -gt 0 ]; then
+            exit 1
+          fi
+          
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: commit-validation-report
+          path: full-report.md
+          
+      - name: Create commit status
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const valid = '${{ steps.validate.outputs.invalid_count }}' === '0';
+            const warnings = parseInt('${{ steps.validate.outputs.warning_count }}');
+            
+            let state = valid ? 'success' : 'failure';
+            let description = valid 
+              ? (warnings > 0 ? 'All commits valid with warnings' : 'All commit messages are valid')
+              : 'Some commit messages are invalid';
+            
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: state,
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              description: description,
+              context: 'Commit Message Validation'
+            });
+          
+      - name: Comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('full-report.md', 'utf8');
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && c.body.includes('## 📝 Commit Validation Report')
+            );
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
