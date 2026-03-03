@@ -2,14 +2,13 @@ name: PR Guard Validation
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
-    branches: [main, master, develop, 'release/*']
+    types: [opened, synchronize, reopened, edited]
+    branches: [master, develop, 'release/*']
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  statuses: write
 
 jobs:
   validate:
@@ -21,75 +20,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.21'
           cache: true
-          cache-dependency-path: go.sum
           
-      - name: Install dependencies
-        run: go mod download
-        
-      - name: Build PR Guard
+      - name: Install PR Guard
         run: |
-          go build -o pr-guard ./cmd/pr-guard
-          chmod +x pr-guard
-          
-      - name: Create config file if not exists
-        run: |
-          if [ ! -f .pr-guard.yaml ]; then
-            cat > .pr-guard.yaml << 'EOF'
-pr:
-  title:
-    conventional: true
-    types:
-      - feat
-      - fix
-      - docs
-      - style
-      - refactor
-      - perf
-      - test
-      - build
-      - ci
-      - chore
-      - revert
-    max_length: 100
-    min_length: 10
-  description:
-    required: true
-    min_length: 20
-  branch:
-    allowed_prefixes:
-      - feature/
-      - bugfix/
-      - hotfix/
-      - release/
-      - chore/
-      - deps/
-  commits:
-    validate_all: true
-    ignore_merge: true
-    allowed_types:
-      - feat
-      - fix
-      - docs
-      - style
-      - refactor
-      - perf
-      - test
-      - chore
-    subject_length:
-      max: 50
-      min: 3
-  labels:
-    require: []
-    forbid: []
-EOF
-          fi
+          go install github.com/anket-cd/pr-guard/cmd/pr-guard@latest
           
       - name: Validate PR
         id: validate
@@ -97,11 +37,11 @@ EOF
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./pr-guard validate-pr \
+          pr-guard validate-pr \
             --owner ${{ github.repository_owner }} \
             --repo ${{ github.event.repository.name }} \
             --pr ${{ github.event.number }} \
-            --format markdown > validation-report.md
+            --config .pr-guard.yaml > validation-report.md
           
       - name: Read validation report
         id: report
@@ -109,13 +49,13 @@ EOF
         with:
           path: ./validation-report.md
           
-      - name: Find existing comment
+      - name: Find Comment
         uses: peter-evans/find-comment@v3
         id: fc
         with:
           issue-number: ${{ github.event.number }}
           comment-author: 'github-actions[bot]'
-          body-includes: 'PR Guard Validation Report'
+          body-includes: PR Guard Validation Report
           
       - name: Create or update comment
         uses: peter-evans/create-or-update-comment@v4
@@ -125,93 +65,9 @@ EOF
           body-path: validation-report.md
           edit-mode: replace
           
-      - name: Add PR status check
-        if: always()
-        run: |
-          if [ -f validation-report.md ]; then
-            if grep -q "❌ Validation Failed" validation-report.md; then
-              echo "status=failure" >> $GITHUB_ENV
-            else
-              echo "status=success" >> $GITHUB_ENV
-            fi
-          fi
-          
-      - name: Update PR status
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const status = process.env.status === 'failure' ? 'failure' : 'success';
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.payload.pull_request.head.sha,
-              state: status,
-              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${context.issue.number}`,
-              description: status === 'success' ? 'PR validation passed' : 'PR validation failed',
-              context: 'PR Guard Validation'
-            });
-            
-      - name: Add labels based on validation
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const fs = require('fs');
-            let hasErrors = false;
-            
-            if (fs.existsSync('validation-report.md')) {
-              const report = fs.readFileSync('validation-report.md', 'utf8');
-              hasErrors = report.includes('❌ Validation Failed');
-            }
-            
-            // Get current labels
-            const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-            });
-            
-            const labelNames = currentLabels.map(l => l.name);
-            
-            if (hasErrors) {
-              // Add needs-fix label if not present
-              if (!labelNames.includes('needs-fix')) {
-                await github.rest.issues.addLabels({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  labels: ['needs-fix']
-                });
-              }
-              
-              // Remove approved label if present
-              if (labelNames.includes('approved')) {
-                await github.rest.issues.removeLabel({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: 'approved'
-                }).catch(() => {});
-              }
-            } else {
-              // Remove needs-fix label if present
-              if (labelNames.includes('needs-fix')) {
-                await github.rest.issues.removeLabel({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: 'needs-fix'
-                }).catch(() => {});
-              }
-            }
-          
       - name: Check validation result
         if: steps.validate.outcome == 'failure'
         run: |
           echo "❌ PR validation failed"
-          echo "Please check the validation report in the PR comments"
           cat validation-report.md
           exit 1
